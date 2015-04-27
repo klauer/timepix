@@ -1,0 +1,4 @@
+include "tpxDetectorSupport.dbd"
+include "commonDriverSupport.dbd"
+include "drvAsynIPPort.dbd"
+include "NDFileMagick.dbd"
