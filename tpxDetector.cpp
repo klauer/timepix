@@ -822,7 +822,8 @@ bool tpxDetector::initializeDetector(void) {
 
 void tpxDetector::setupTriggering(bool internal) {
     u32 reg=0;
-    int bit23=0,bit24=0;
+    int bit23=0;
+    int bit24=0;
     
     lock();
 
@@ -832,6 +833,9 @@ void tpxDetector::setupTriggering(bool internal) {
 
     // Reset 'burst readout' bit, just in case
     reg &= ~MPIX2_CONF_BURST_READOUT;
+
+    // Disable test pulse (? **)
+    reg &= ~MPIX2_CONF_ENABLE_TPULSE;
 
     // Close shutter (re-enabled below when appropriate)
     reg |= MPIX2_CONF_SHUTTER_CLOSED;
@@ -860,13 +864,14 @@ void tpxDetector::setupTriggering(bool internal) {
     }
 
     (*relaxd->writeReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, reg );
-    asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
-              "Trigger setup completed (reg set=%x, read back:\n", reg);
 
-    epicsThreadSleep(0.1);
-    (*relaxd->readReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, &reg );
+    u32 readback=0;
+    epicsThreadSleep(0.01);
+    (*relaxd->readReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, &readback );
+
     asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
-              "=%x)\n", reg);
+              "Trigger setup completed (configuration set=%x, read back: %x)\n", 
+              reg, readback);
 
     unlock();
 }
@@ -2047,6 +2052,9 @@ bool tpxDetector::setDetectorSet() {
     if (pInputFile != NULL) {
         fscanf(pInputFile, "%s", str);
         sscanf(&str[13], "%f", &data_f);
+        asynPrint(pasynUserSelf, ASYN_TRACE_FLOW,
+                  "%s:%s: Setting testpulselow to %f\n",
+                  driverName, functionName, data_f);
         if( (*relaxd->setHwInfo)(ids[uiDevIp_], HW_ITEM_TESTPULSELO, &data_f, 4) ) {
             asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
                       "%s:%s: setup of hw parameter TestPulseLow failed:\n",
@@ -2056,6 +2064,9 @@ bool tpxDetector::setDetectorSet() {
         }
         fscanf(pInputFile, "%s", str);
         sscanf(&str[14], "%f", &data_f);
+        asynPrint(pasynUserSelf, ASYN_TRACE_FLOW,
+                  "%s:%s: Setting testpulsehigh to %f\n",
+                  driverName, functionName, data_f);
         if( (*relaxd->setHwInfo)(ids[uiDevIp_], HW_ITEM_TESTPULSEHI, &data_f, 4) ) {
             asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
                       "%s:%s: setup of hw parameter TestPulseHigh failed:\n",
@@ -2076,6 +2087,9 @@ bool tpxDetector::setDetectorSet() {
             // (0) HW_ITEM_TESTPULSEFREQ          11
             // (1) HW_ITEM_BIAS_VOLTAGE_ADJUST    12
             // (2) HW_ITEM_VDD_ADJUST             13
+            asynPrint(pasynUserSelf, ASYN_TRACE_FLOW,
+                      "%s:%s: Setting hwitem %d to %lu\n",
+                      driverName, functionName, (HW_ITEM_TESTPULSEFREQ+i), data_lu);
             if( (*relaxd->setHwInfo)(ids[uiDevIp_], (HW_ITEM_TESTPULSEFREQ+i), &data_lu, 4) ) {
                 asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
                           "%s:%s: setup of hw parameter number %d failed:\n",
@@ -2104,6 +2118,10 @@ bool tpxDetector::setDetectorSet() {
             // (7) HW_ITEM_CONF_RO_CLOCK_125MHZ   25
             // (8) HW_ITEM_CONF_TPX_PRECLOCKS     26
             // (9) HW_ITEM_RESERVED               27
+            asynPrint(pasynUserSelf, ASYN_TRACE_FLOW,
+                      "%s:%s: Setting hwitem %d to %lu\n",
+                      driverName, functionName, (HW_ITEM_FIRSTCHIPNR+i), data_lu);
+
             if( (*relaxd->setHwInfo)(ids[uiDevIp_], (HW_ITEM_FIRSTCHIPNR+i), &data_lu, 4) ) {
                 asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
                           "%s:%s: setup of hw parameter number %d failed:\n",
