@@ -553,7 +553,21 @@ tpxDetector::~tpxDetector() {
 //_____________________________________________________________________________________________
 
 
-
+static void hw_callback(INTPTR userData, int eventType, void *data) {
+    // tpxDetector *tpx = (tpxDetector*)userData;
+    // 
+    // tpx->lock();
+    printf("** Hardware callback: ");
+    switch (eventType) {
+    case HWCB_ACQSTARTED: printf("HWCB_ACQSTARTED");
+    case HWCB_ACQFINISHED: printf("HWCB_ACQFINISHED");
+    case HWCB_DEVDISCONNECTED: printf("HWCB_DEVDISCONNECTED");
+    default:
+        printf("Unknown?");
+    }
+    printf("\n");
+    //tpx->unlock();
+}
 
 //_____________________________________________________________________________________________
 
@@ -696,6 +710,9 @@ bool tpxDetector::initializeDetector(void) {
                   driverName, functionName, ret);
         return false;
     }
+    
+    // (*relaxd->setCallbackData)(uiDevIp_, (INTPTR)this);
+    (*relaxd->setCallback)(&hw_callback);
 
     asynPrint(pasynUserSelf, ASYN_TRACE_FLOW,
               "%s:%s: Timepix detector initialized\n",
@@ -828,11 +845,13 @@ void tpxDetector::setupTriggering(bool internal) {
     }
 
     (*relaxd->writeReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, reg );
-    printf("Trigger setup completed (reg set=%x, read back", reg);
+    asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+              "Trigger setup completed (reg set=%x, read back", reg);
 
     epicsThreadSleep(0.1);
     (*relaxd->readReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, &reg );
-    printf("=%x)\n", reg);
+    asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+              "=%x)\n", reg);
 }
 
 void timestamp()
@@ -862,7 +881,6 @@ u32 tpxDetector::checkStatus(void) {
     (*relaxd->readReg)(ids[uiDevIp_], MPIX2_STATUS_REG_OFFSET, &reg);
 
     if (reg != lastStatus_) {
-
         printf("-!- "); 
         timestamp();
         printf(" Status changed %x: ", reg);
@@ -906,6 +924,20 @@ u32 tpxDetector::checkStatus(void) {
         lastStatus_ = reg;
 
     }
+    
+    static const char *last_err=NULL;
+    static const char *last_dev_err=NULL;
+
+    if ((*relaxd->getLastError)() != last_err) {
+        last_err = (*relaxd->getLastError)();
+        printf("Error status: %s\n", last_err);
+    }
+
+    if ((*relaxd->getLastDevError)(ids[uiDevIp_]) != last_dev_err) {
+        last_dev_err = (*relaxd->getLastDevError)(ids[uiDevIp_]);
+        printf("Dev error status: %s\n", last_dev_err);
+    }
+
     unlock();
     return reg;
 }
@@ -1071,6 +1103,15 @@ void tpxDetector::acquireTask(void) {
 
         // Is acquisition active?
         getIntegerParam(ADAcquire, &acquire);
+
+        /*
+        if (driverReady) {
+            u32 reg=0;
+            (*relaxd->readReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, &reg );
+            reg |= MPIX2_CONF_EXT_TRIG_INHIBIT;
+            reg &= ~MPIX2_CONF_EXT_TRIG_ENABLE;
+            (*relaxd->writeReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, reg );
+        }*/
         
         // If we are not acquiring then wait for a semaphore that is given when acquisition is started
         if (!acquire) {
@@ -1128,12 +1169,16 @@ void tpxDetector::acquireTask(void) {
         getIntegerParam(ADNumImagesCounter, &numImagesCounter);
 
         if (trigmode==TPX_EXTERNAL_TRIGGER) {
-            printf("---- EXTERNAL TRIGGER MODE (image %d) ----\n", numImagesCounter);
+            asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                      "---- EXTERNAL TRIGGER MODE (image %d) ----\n", 
+                      numImagesCounter);
 
             getIntegerParam(ADNumImagesCounter, &numImagesCounter);
             if(numImagesCounter==0) {
                 setupTriggering(false);
             }
+
+            epicsTimeStamp t0, t1;
 
             epicsTimeGetCurrent(&startTime);
             // Open the ADShutter
@@ -1141,6 +1186,8 @@ void tpxDetector::acquireTask(void) {
             bool read_frame = false;
             while(true) {
                 if ((*relaxd->newFrame)(ids[uiDevIp_], true, true)) {
+                    asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                              "** new frame **\n");
                     read_frame = true;
                     pInput = &pAcqBuffer_[0];
 
@@ -1160,10 +1207,22 @@ void tpxDetector::acquireTask(void) {
                     setShutter(0);
                     break;
                 }
-
+                
+                epicsTimeGetCurrent(&t0);
+                
                 this->unlock();
                 estatus = epicsEventTryWait(this->stopEventId);
                 this->lock();
+                epicsTimeGetCurrent(&t1);
+
+                elapsedTime = epicsTimeDiffInSeconds(&t1, &t0);
+
+                if (elapsedTime > 0.01) {
+                    asynPrint(this->pasynUserSelf, ASYN_TRACE_ERROR,
+                              "%s:%s: unlock elapsedTime?=%f\n",
+                              driverName, functionName, elapsedTime);
+                }
+
                 if (estatus==epicsEventWaitOK) {
                     (*relaxd->closeShutter)(ids[uiDevIp_]);
                     (*relaxd->resetMatrix)(ids[uiDevIp_]);
@@ -1185,18 +1244,25 @@ void tpxDetector::acquireTask(void) {
                 ((imageMode == ADImageMultiple) && (numImagesCounter >= numImages)))) {
                 u32 reg=0;
                 (*relaxd->readReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, &reg );
-                printf("End of acquisition/broken acquisition, inhibit triggers (reg=%x, ", reg);
+                asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                          "End of acquisition/broken acquisition, inhibit triggers (reg=%x, ", reg);
                 reg |= MPIX2_CONF_EXT_TRIG_INHIBIT;
+                reg &= ~MPIX2_CONF_EXT_TRIG_ENABLE;
                 (*relaxd->writeReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, reg );
-                printf("set %x)\n", reg);
+                asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                           "set %x)\n", reg);
             }
 
             if (!read_frame) {
+                asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                          "Read frame failed; continuing loop\n");
                 continue;
             }
             
         } else if (trigmode==TPX_INTERNAL_TRIGGER) {
-            printf("---- INTERNAL TRIGGER MODE (image %d) ----\n", numImagesCounter);
+            asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                      "---- INTERNAL TRIGGER MODE (image %d) ----\n",
+                      numImagesCounter);
 
             getIntegerParam(ADNumImagesCounter, &numImagesCounter);
             if(numImagesCounter==0) {
@@ -1928,7 +1994,8 @@ int tpxDetector::closeRawDataFile() {
         int ret=fclose(rawDataFile);
         if(ret==0) {
             rawDataFile=NULL;
-            printf("Raw data file closed\n");
+            asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                      "Raw data file closed\n");
         }
         return ret;
     }
