@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <unistd.h>
+#include <time.h>
 
 #include <epicsTime.h>
 #include <epicsThread.h>
@@ -130,6 +131,7 @@ class tpxDetector : public ADDriver {
     // void endAcqCallback(HACQDESC hAcqDesc);
 
     epicsThreadId acquireTaskId;
+    epicsThreadId statusTaskId;
     //epicsThreadId SoPhyTaskId;
 
     void acquireTask(void);
@@ -148,7 +150,11 @@ class tpxDetector : public ADDriver {
     int openRawDataFile(char* directory, char* baseName);
     int closeRawDataFile();
     int writeRawData(u8* datai, u32 nbytes, int lostRows);
-  protected:
+
+    u32 checkStatus(void);
+    u32 checkConfiguration(void);
+
+protected:
     // Re-orders pixels from the MPX native order (256*(4*256)) to 512*512 in case of quad
     void reorderPixels(epicsInt16 *pInput, epicsInt16 *pOutput);
     void copyPixels(epicsInt16 *pInput, epicsInt16 *pOutput);
@@ -206,8 +212,10 @@ class tpxDetector : public ADDriver {
     unsigned long lastPreviewUpdate;
     bool isTimeForPreviewUpdate();
 
+private:
+    u32 lastStatus_;
+    u32 lastConfiguration_;
 
-  private:
     int mark;
 //   MpxModule *relaxd;
 //    EpicsInterface *relaxd;
@@ -325,6 +333,7 @@ class tpxDetector : public ADDriver {
 
 static void acquireTaskC(void *drvPvt);
 static void exitCallbackC(void *drvPvt);
+static void statusCheckTask(void *drvPvt);
 //static void SoPhyThreadC(void *drvPvt);
 //_____________________________________________________________________________________________
 
@@ -343,7 +352,9 @@ tpxDetector::tpxDetector(const char *portName, int maxBuffers,
         ndevs(0), devnum(0), rawDataFile(NULL), driverReady(false) {
     int status = asynSuccess;
     static const char *functionName = "tpxDetector";
-
+    
+    lastStatus_ = 0;
+    lastConfiguration_ = 0;
     pAcqBuffer_           = NULL;
     pAcqBufferExt_           = NULL;
     bInitAlways_          = false;
@@ -462,10 +473,7 @@ tpxDetector::tpxDetector(const char *portName, int maxBuffers,
         return;
     }
 
-
-
     /* Create the thread that updates the images */
-
     acquireTaskId = epicsThreadCreate("acquireTaskC",
                                       epicsThreadPriorityHigh,
                                       epicsThreadGetStackSize(epicsThreadStackMedium),
@@ -473,6 +481,20 @@ tpxDetector::tpxDetector(const char *portName, int maxBuffers,
                                       this);
 
     if (acquireTaskId == NULL) {
+        asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
+                  "%s:%s: epicsThreadCreate failure for image task\n",
+                  driverName, functionName);
+        return;
+    }
+
+    /* Create the thread that updates the images */
+    statusTaskId = epicsThreadCreate("statusCheck",
+                                      epicsThreadPriorityHigh,
+                                      epicsThreadGetStackSize(epicsThreadStackMedium),
+                                      (EPICSTHREADFUNC)statusCheckTask,
+                                      this);
+
+    if (statusTaskId == NULL) {
         asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
                   "%s:%s: epicsThreadCreate failure for image task\n",
                   driverName, functionName);
@@ -504,6 +526,15 @@ static void acquireTaskC(void *drvPvt) {
     pPvt->acquireTask();
 }
 
+
+static void statusCheckTask(void *drvPvt) {
+    tpxDetector *pPvt = (tpxDetector *)drvPvt;
+    
+    while(true) {
+        pPvt->checkStatus();
+        epicsThreadSleep(0.05);
+    }
+}
 
 
 //_____________________________________________________________________________________________
@@ -804,6 +835,205 @@ void tpxDetector::setupTriggering(bool internal) {
     printf("=%x)\n", reg);
 }
 
+void timestamp()
+{
+    epicsTimeStamp ts;
+    epicsTimeGetCurrent(&ts);
+
+    char buf[256];
+
+    epicsTime t(ts);
+    size_t numChar = t.strftime(buf, sizeof(buf), "%H:%M:%S.%09f");
+    if (numChar > 0) {
+        printf((const char*)buf);
+    }
+}
+
+u32 tpxDetector::checkStatus(void) {
+    if(!driverReady) {
+        return 0;
+    }
+
+    u32 reg=0;
+
+    checkConfiguration();
+
+    lock();
+    (*relaxd->readReg)(ids[uiDevIp_], MPIX2_STATUS_REG_OFFSET, &reg);
+
+    if (reg != lastStatus_) {
+
+        printf("-!- "); 
+        timestamp();
+        printf(" Status changed %x: ", reg);
+        if ((reg & MPIX2_STATUS_MPIX_IDLE) == MPIX2_STATUS_MPIX_IDLE) {
+            printf("MPIX_IDLE ");
+        }
+        if ((reg & MPIX2_STATUS_MPIX_BUSY) == MPIX2_STATUS_MPIX_BUSY) {
+            printf("MPIX_BUSY ");
+        }
+        if ((reg & MPIX2_STATUS_XMT_READY) == MPIX2_STATUS_XMT_READY) {
+            printf("XMT_READY ");
+        }
+        if ((reg & MPIX2_STATUS_RCV_READY) == MPIX2_STATUS_RCV_READY) {
+            printf("RCV_READY ");
+        }
+        if ((reg & MPIX2_STATUS_DATARCV_READY) == MPIX2_STATUS_DATARCV_READY) {
+            printf("DATARCV_READY ");
+        }
+        if ((reg & MPIX2_STATUS_SHUTTER_READY) == MPIX2_STATUS_SHUTTER_READY) {
+            printf("SHUTTER_READY ");
+        }
+        if ((reg & MPIX2_STATUS_BURST_READY_INT) == MPIX2_STATUS_BURST_READY_INT) {
+            printf("BURST_READY_INT ");
+        }
+        if ((reg & MPIX2_STATUS_BUS_ERR_INT) == MPIX2_STATUS_BUS_ERR_INT) {
+            printf("BUS_ERR_INT ");
+        }
+        if ((reg & MPIX2_STATUS_CONNECT_ERR_INT) == MPIX2_STATUS_CONNECT_ERR_INT) {
+            printf("CONNECT_ERR_INT ");
+        }
+        if ((reg & MPIX2_STATUS_WATCHDOG_ERR_INT) == MPIX2_STATUS_WATCHDOG_ERR_INT) {
+            printf("WATCHDOG_ERR_INT ");
+        }
+        if ((reg & MPIX2_STATUS_FATAL_ERR_INT) == MPIX2_STATUS_FATAL_ERR_INT) {
+            printf("FATAL_ERR_INT ");
+        }
+        if ((reg & MPIX2_STATUS_EXT_TRIG_INT) == MPIX2_STATUS_EXT_TRIG_INT) {
+            printf("EXT_TRIG_INT "); 
+        }
+        printf("\n");
+        lastStatus_ = reg;
+
+    }
+    unlock();
+    return reg;
+}
+
+u32 tpxDetector::checkConfiguration(void) {
+    if(!driverReady) {
+        return 0;
+    }
+
+    u32 reg=0;
+
+    lock();
+    (*relaxd->readReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, &reg);
+
+    if (reg != lastConfiguration_) {
+
+        printf("-!- "); 
+        timestamp();
+        printf(" Configuration changed %x: ", reg);
+
+        if ((reg & MPIX2_CONF_START) == MPIX2_CONF_START) {
+            printf("START ");
+        }
+        if ((reg & MPIX2_CONF_MODE_MASK) == MPIX2_CONF_MODE_MASK) {
+            printf("MODE_MASK ");
+        }
+        if ((reg & MPIX2_CONF_MODE_READOUT) == MPIX2_CONF_MODE_READOUT) {
+            printf("MODE_READOUT ");
+        }
+        if ((reg & MPIX2_CONF_MODE_SET_MATRIX) == MPIX2_CONF_MODE_SET_MATRIX) {
+            printf("MODE_SET_MATRIX ");
+        }
+        if ((reg & MPIX2_CONF_MODE_SET_DAC) == MPIX2_CONF_MODE_SET_DAC) {
+            printf("MODE_SET_DAC ");
+        }
+        if ((reg & MPIX2_CONF_POLARITY) == MPIX2_CONF_POLARITY) {
+            printf("POLARITY ");
+        }
+        if ((reg & MPIX2_CONF_SPARE_FSR) == MPIX2_CONF_SPARE_FSR) {
+            printf("SPARE_FSR ");
+        }
+        if ((reg & MPIX2_CONF_ENABLE_TPULSE) == MPIX2_CONF_ENABLE_TPULSE) {
+            printf("ENABLE_TPULSE ");
+        }
+        if ((reg & MPIX2_CONF_ENABLE_CST) == MPIX2_CONF_ENABLE_CST) {
+            printf("ENABLE_CST ");
+        }
+        if ((reg & MPIX2_CONF_P_S) == MPIX2_CONF_P_S) {
+            printf("P_S ");
+        }
+        if ((reg & MPIX2_CONF_SHUTTER_CLOSED) == MPIX2_CONF_SHUTTER_CLOSED) {
+            printf("SHUTTER_CLOSED ");
+        }
+        if ((reg & MPIX2_CONF_TIMER_USED) == MPIX2_CONF_TIMER_USED) {
+            printf("TIMER_USED ");
+        }
+        if ((reg & MPIX2_CONF_RESET_MPIX) == MPIX2_CONF_RESET_MPIX) {
+            printf("RESET_MPIX ");
+        }
+        if ((reg & MPIX2_CONF_BURST_READOUT) == MPIX2_CONF_BURST_READOUT) {
+            printf("BURST_READOUT ");
+        }
+        if ((reg & MPIX2_CONF_CHIP_ALL) == MPIX2_CONF_CHIP_ALL) {
+            printf("CHIP_ALL ");
+        }
+        if ((reg & MPIX2_CONF_CHIP_SEL_MASK) == MPIX2_CONF_CHIP_SEL_MASK) {
+            printf("CHIP_SEL_MASK ");
+        }
+        if ((reg & MPIX2_CONF_CHIP_SEL_SHIFT) == MPIX2_CONF_CHIP_SEL_SHIFT) {
+            printf("CHIP_SEL_SHIFT ");
+        }
+        if ((reg & MPIX2_CONF_EXT_TRIG_ENABLE) == MPIX2_CONF_EXT_TRIG_ENABLE) {
+            printf("EXT_TRIG_ENABLE ");
+        }
+        if ((reg & MPIX2_CONF_EXT_TRIG_FALLING_EDGE) == MPIX2_CONF_EXT_TRIG_FALLING_EDGE) {
+            printf("EXT_TRIG_FALLING_EDGE ");
+        }
+        if ((reg & MPIX2_CONF_EXT_TRIG_INHIBIT) == MPIX2_CONF_EXT_TRIG_INHIBIT) {
+            printf("EXT_TRIG_INHIBIT ");
+        }
+        if ((reg & MPIX2_CONF_TPX_CLOCK_MASK) == MPIX2_CONF_TPX_CLOCK_MASK) {
+            printf("TPX_CLOCK_MASK ");
+        }
+        if ((reg & MPIX2_CONF_TPX_CLOCK_SHIFT) == MPIX2_CONF_TPX_CLOCK_SHIFT) {
+            printf("TPX_CLOCK_SHIFT ");
+        }
+        if ((reg & MPIX2_CONF_TPX_CLOCK_100MHZ) == MPIX2_CONF_TPX_CLOCK_100MHZ) {
+            printf("TPX_CLOCK_100MHZ ");
+        }
+        if ((reg & MPIX2_CONF_TPX_CLOCK_50MHZ) == MPIX2_CONF_TPX_CLOCK_50MHZ) {
+            printf("TPX_CLOCK_50MHZ ");
+        }
+        if ((reg & MPIX2_CONF_TPX_CLOCK_10MHZ) == MPIX2_CONF_TPX_CLOCK_10MHZ) {
+            printf("TPX_CLOCK_10MHZ ");
+        }
+        if ((reg & MPIX2_CONF_TPX_CLOCK_EXT) == MPIX2_CONF_TPX_CLOCK_EXT) {
+            printf("TPX_CLOCK_EXT ");
+        }
+        if ((reg & MPIX2_CONF_RO_CLOCK_125MHZ) == MPIX2_CONF_RO_CLOCK_125MHZ) {
+            printf("RO_CLOCK_125MHZ ");
+        }
+        if ((reg & MPIX2_CONF_TPX_PRECLOCKS) == MPIX2_CONF_TPX_PRECLOCKS) {
+            printf("TPX_PRECLOCKS ");
+        }
+        if ((reg & MPIX2_CONF_TPX_TRIG_TYPE_SHIFT) == MPIX2_CONF_TPX_TRIG_TYPE_SHIFT) {
+            printf("TPX_TRIG_TYPE_SHIFT ");
+        }
+        if ((reg & MPIX2_CONF_TPX_TRIG_TYPE_NEG) == MPIX2_CONF_TPX_TRIG_TYPE_NEG) {
+            printf("TPX_TRIG_TYPE_NEG ");
+        }
+        if ((reg & MPIX2_CONF_TPX_TRIG_TYPE_POS) == MPIX2_CONF_TPX_TRIG_TYPE_POS) {
+            printf("TPX_TRIG_TYPE_POS ");
+        }
+        if ((reg & MPIX2_CONF_TPX_TRIG_TYPE_PULSE) == MPIX2_CONF_TPX_TRIG_TYPE_PULSE) {
+            printf("TPX_TRIG_TYPE_PULSE ");
+        }
+        if ((reg & MPIX2_CONF_TPX_TRIG_TYPE_MASK) == MPIX2_CONF_TPX_TRIG_TYPE_MASK) {
+            printf("TPX_TRIG_TYPE_MASK ");
+        }
+        printf("\n");
+        lastConfiguration_ = reg;
+
+    }
+    unlock();
+    return reg;
+}
+
+
 void tpxDetector::acquireTask(void) {
     int status = asynSuccess;
     const int mtrx= uiRows_*uiColumns_;
@@ -831,7 +1061,6 @@ void tpxDetector::acquireTask(void) {
     int lostRows = 0;
 #endif
 
-
     const char *functionName = "acquireTask";
     double elapsedTime,acquireTime;
     epicsEventWaitStatus estatus;
@@ -842,7 +1071,7 @@ void tpxDetector::acquireTask(void) {
 
         // Is acquisition active?
         getIntegerParam(ADAcquire, &acquire);
-
+        
         // If we are not acquiring then wait for a semaphore that is given when acquisition is started
         if (!acquire) {
             this->closeRawDataFile();
@@ -854,17 +1083,15 @@ void tpxDetector::acquireTask(void) {
                       "%s:%s: waiting for acquire to start\n", driverName, functionName);
 
             // Release the lock while we wait for an event that says acquire has started, then lock again
-            this->unlock();
 
             // resetting the detector takes ~2 seconds
             if(driverReady) {
                 this->resetDetector();
             }
+            this->unlock();
 
             status = epicsEventWait(this->startEventId);
-            asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,"%s:%s: start event (lock)\n", driverName, functionName);
             this->lock();
-            asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,"%s:%s: start event (locked)\n", driverName, functionName);
             setIntegerParam(ADNumImagesCounter, 0);
 
             status |= getIntegerParam(TPX_SaveToFile, &savetofile);
@@ -902,6 +1129,7 @@ void tpxDetector::acquireTask(void) {
 
         if (trigmode==TPX_EXTERNAL_TRIGGER) {
             printf("---- EXTERNAL TRIGGER MODE (image %d) ----\n", numImagesCounter);
+
             getIntegerParam(ADNumImagesCounter, &numImagesCounter);
             if(numImagesCounter==0) {
                 setupTriggering(false);
@@ -913,6 +1141,7 @@ void tpxDetector::acquireTask(void) {
             bool read_frame = false;
             while(true) {
                 if ((*relaxd->newFrame)(ids[uiDevIp_], true, true)) {
+                    read_frame = true;
                     pInput = &pAcqBuffer_[0];
 
 #ifdef RAW_DATA_READOUT
@@ -926,7 +1155,7 @@ void tpxDetector::acquireTask(void) {
 #else
                     (*relaxd->readMatrix)(ids[uiDevIp_], pInput,mtrx);
 #endif
-
+                
                     // Close the ADshutter
                     setShutter(0);
                     break;
@@ -949,10 +1178,23 @@ void tpxDetector::acquireTask(void) {
                 }
             }
 
+            getIntegerParam(ADNumImages, &numImages);
+            getIntegerParam(ADNumImagesCounter, &numImagesCounter);
+            if (!read_frame ||
+                ((imageMode == ADImageSingle) ||
+                ((imageMode == ADImageMultiple) && (numImagesCounter >= numImages)))) {
+                u32 reg=0;
+                (*relaxd->readReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, &reg );
+                printf("End of acquisition/broken acquisition, inhibit triggers (reg=%x, ", reg);
+                reg |= MPIX2_CONF_EXT_TRIG_INHIBIT;
+                (*relaxd->writeReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, reg );
+                printf("set %x)\n", reg);
+            }
+
             if (!read_frame) {
                 continue;
             }
-
+            
         } else if (trigmode==TPX_INTERNAL_TRIGGER) {
             printf("---- INTERNAL TRIGGER MODE (image %d) ----\n", numImagesCounter);
 
@@ -1797,25 +2039,13 @@ bool tpxDetector::setDetectorSet() {
 
     // set readout configuration
     for( i=0; i<ndevs; i++ ) {
-
-        int fsr_retries = 10;
-        while (fsr_retries > 0) {
-            if( (*relaxd->setFsr)(ids[uiDevIp_], i, &TDD[i*ndp], 0) ) {
-                asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
-                          "%s:%s: setFsr() chip %d failed\n",
-                          driverName, functionName, i);
-            } else {
-                // Set FSR successfully
-                break;
-            }
-        }
-
-        if (fsr_retries == 0) {
+        if( (*relaxd->setFsr)(ids[uiDevIp_], i, &TDD[i*ndp], 0) ) {
+            asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
+                      "%s:%s: setFsr() chip %d failed\n",
+                      driverName, functionName, i);
             return true;
         }
-
     }
-
     return false;
 }
 

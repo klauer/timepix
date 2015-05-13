@@ -10,7 +10,7 @@
 #include <jni.h>
 #include "PxmMpx2Interface.h"
 
-static JavaVM * jvm = NULL;
+static JavaVM *jvm = NULL;
 static JNIEnv *env = NULL;
 
 PxmMpx2Interface *relaxd;
