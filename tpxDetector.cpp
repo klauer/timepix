@@ -530,9 +530,22 @@ static void acquireTaskC(void *drvPvt) {
 static void statusCheckTask(void *drvPvt) {
     tpxDetector *pPvt = (tpxDetector *)drvPvt;
     
+    epicsTimeStamp t0, t1;
+    double elapsedTime;
+
     while(true) {
+        epicsTimeGetCurrent(&t0);
+    
         pPvt->checkStatus();
-        epicsThreadSleep(0.05);
+
+        epicsTimeGetCurrent(&t1);
+
+        elapsedTime = epicsTimeDiffInSeconds(&t1, &t0);
+
+        if (elapsedTime > 0.002) {
+            printf("Status check slow! elapsedTime=%f\n", elapsedTime);
+        }
+        epicsThreadSleep(0.001);
     }
 }
 
@@ -810,6 +823,8 @@ bool tpxDetector::initializeDetector(void) {
 void tpxDetector::setupTriggering(bool internal) {
     u32 reg=0;
     int bit23=0,bit24=0;
+    
+    lock();
 
     (*relaxd->readReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, &reg );
     // Reset 'use Timer'
@@ -846,12 +861,14 @@ void tpxDetector::setupTriggering(bool internal) {
 
     (*relaxd->writeReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, reg );
     asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
-              "Trigger setup completed (reg set=%x, read back", reg);
+              "Trigger setup completed (reg set=%x, read back:\n", reg);
 
     epicsThreadSleep(0.1);
     (*relaxd->readReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, &reg );
     asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
               "=%x)\n", reg);
+
+    unlock();
 }
 
 void timestamp()
@@ -924,21 +941,26 @@ u32 tpxDetector::checkStatus(void) {
         lastStatus_ = reg;
 
     }
-    
+
+    unlock();
+
     static const char *last_err=NULL;
     static const char *last_dev_err=NULL;
-
+    
+    lock();
     if ((*relaxd->getLastError)() != last_err) {
         last_err = (*relaxd->getLastError)();
         printf("Error status: %s\n", last_err);
     }
+    unlock();
 
+    lock();
     if ((*relaxd->getLastDevError)(ids[uiDevIp_]) != last_dev_err) {
         last_dev_err = (*relaxd->getLastDevError)(ids[uiDevIp_]);
         printf("Dev error status: %s\n", last_dev_err);
     }
-
     unlock();
+
     return reg;
 }
 
@@ -1079,6 +1101,7 @@ void tpxDetector::acquireTask(void) {
     size_t dims[2];
     int acquire;
     epicsTimeStamp startTime, endTime;
+    int poll_count;
 
     NDArray       *pImage;
     NDDataType_t  dataType;
@@ -1100,6 +1123,8 @@ void tpxDetector::acquireTask(void) {
 
     // Loop forever
     while (1) {
+
+        poll_count = 0;
 
         // Is acquisition active?
         getIntegerParam(ADAcquire, &acquire);
@@ -1128,8 +1153,8 @@ void tpxDetector::acquireTask(void) {
             if(driverReady) {
                 this->resetDetector();
             }
-            this->unlock();
 
+            this->unlock();
             status = epicsEventWait(this->startEventId);
             this->lock();
             setIntegerParam(ADNumImagesCounter, 0);
@@ -1184,6 +1209,7 @@ void tpxDetector::acquireTask(void) {
             setShutter(1);
             bool read_frame = false;
             while(true) {
+                poll_count++;
                 if ((*relaxd->newFrame)(ids[uiDevIp_], true, true)) {
                     asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
                               "** new frame **\n");
@@ -1193,10 +1219,10 @@ void tpxDetector::acquireTask(void) {
 #ifdef RAW_DATA_READOUT
                     (*relaxd->readMatrixRaw)(ids[uiDevIp_], myarray8, &nbytes, &lostRows);
 
-                    if(writeRawDataFlag) {
-                        if (this->writeRawData(myarray8, mtrx*multp, lostRows)!=0) {
-                            asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,"%s:%s: Could not write raw data\n", driverName, functionName);
-                        }
+                    if(writeRawDataFlag && writeRawData(myarray8, mtrx*multp, lostRows)!=0) {
+                        asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                                  "%s:%s: Could not write raw data\n",
+                                  driverName, functionName);
                     }
 #else
                     (*relaxd->readMatrix)(ids[uiDevIp_], pInput,mtrx);
@@ -1210,7 +1236,8 @@ void tpxDetector::acquireTask(void) {
                 epicsTimeGetCurrent(&t0);
                 
                 this->unlock();
-                estatus = epicsEventTryWait(this->stopEventId);
+                // estatus = epicsEventTryWait(this->stopEventId);
+                estatus = epicsEventWaitWithTimeout(this->stopEventId, 0.0002);
                 this->lock();
                 epicsTimeGetCurrent(&t1);
 
@@ -1230,7 +1257,8 @@ void tpxDetector::acquireTask(void) {
                     setShutter(0);
                     setIntegerParam(ADAcquire, 0);
                     asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
-                              "%s:%s: acquisition broken (user clicked stop)\n", driverName, functionName);
+                              "%s:%s: acquisition broken (user clicked stop) (poll_count=%d)\n", 
+                              driverName, functionName, poll_count);
                     callParamCallbacks();
                     break;
                 }
@@ -1339,6 +1367,8 @@ void tpxDetector::acquireTask(void) {
             }
         } else {
             // Wait until acquire is true again and acquire mode in a valid state
+            asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                      "Unknown trigger mode %d\n", trigmode);
             continue;
         }
         
@@ -1454,26 +1484,16 @@ void tpxDetector::acquireTask(void) {
         // Call the callbacks to update any changes
         callParamCallbacks();
         getIntegerParam(ADAcquire, &acquire);
-        // If we are acquiring then sleep for the acquire period minus elapsed time.
         if (acquire) {
             epicsTimeGetCurrent(&endTime);
             elapsedTime = epicsTimeDiffInSeconds(&endTime, &startTime);
-            //            delay = dAcqTimeReq_ - elapsedTime;
             asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
-                      "%s:%s: elapsedTime=%f\n",
+                      "%s:%s: frame elapsedTime=%f\n",
                       driverName, functionName, elapsedTime);
-
-            //if (delay >= 0.0) {
-////                     We set the status to readOut to indicate we are in the period delay
-            //setIntegerParam(ADStatus, ADStatusWaiting);
-            //callParamCallbacks();
-            //this->unlock();
-            //status = epicsEventWaitWithTimeout(this->stopEventId, delay);
-            //this->lock();
-            //}
-
+            asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                      "%s:%s: frame poll_count=%d\n",
+                      driverName, functionName, poll_count);
         }
-
     }
 }
 
