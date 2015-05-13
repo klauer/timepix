@@ -1104,17 +1104,16 @@ void tpxDetector::acquireTask(void) {
         // Is acquisition active?
         getIntegerParam(ADAcquire, &acquire);
 
-        /*
-        if (driverReady) {
-            u32 reg=0;
-            (*relaxd->readReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, &reg );
-            reg |= MPIX2_CONF_EXT_TRIG_INHIBIT;
-            reg &= ~MPIX2_CONF_EXT_TRIG_ENABLE;
-            (*relaxd->writeReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, reg );
-        }*/
-        
         // If we are not acquiring then wait for a semaphore that is given when acquisition is started
         if (!acquire) {
+            if (driverReady) {
+                u32 reg=0;
+                (*relaxd->readReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, &reg );
+                reg |= MPIX2_CONF_EXT_TRIG_INHIBIT;
+                reg &= ~MPIX2_CONF_EXT_TRIG_ENABLE;
+                (*relaxd->writeReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, reg );
+            }
+        
             this->closeRawDataFile();
 
             setIntegerParam(ADStatus, ADStatusIdle);
@@ -1239,11 +1238,15 @@ void tpxDetector::acquireTask(void) {
 
             getIntegerParam(ADNumImages, &numImages);
             getIntegerParam(ADNumImagesCounter, &numImagesCounter);
+            getIntegerParam(ADImageMode, &imageMode);
             if (!read_frame ||
-                ((imageMode == ADImageSingle) ||
-                ((imageMode == ADImageMultiple) && (numImagesCounter >= numImages)))) {
+                (imageMode == ADImageSingle) ||
+                ((imageMode == ADImageMultiple) && (numImagesCounter >= numImages))) {
                 u32 reg=0;
                 (*relaxd->readReg)(ids[uiDevIp_], MPIX2_CONF_REG_OFFSET, &reg );
+                asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                          "(Read frame: %d Mode=%d Image counter %d of %d)\n",
+                          read_frame, imageMode, numImagesCounter, numImages);
                 asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
                           "End of acquisition/broken acquisition, inhibit triggers (reg=%x, ", reg);
                 reg |= MPIX2_CONF_EXT_TRIG_INHIBIT;
