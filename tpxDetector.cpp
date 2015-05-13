@@ -2047,7 +2047,7 @@ bool tpxDetector::setDetectorSet() {
     if (pInputFile != NULL) {
         fscanf(pInputFile, "%s", str);
         sscanf(&str[13], "%f", &data_f);
-        if( (*relaxd->setHwInfo)(ids[uiDevIp_], 9, &data_f, 4) ) {
+        if( (*relaxd->setHwInfo)(ids[uiDevIp_], HW_ITEM_TESTPULSELO, &data_f, 4) ) {
             asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
                       "%s:%s: setup of hw parameter TestPulseLow failed:\n",
                       driverName, functionName);
@@ -2056,7 +2056,7 @@ bool tpxDetector::setDetectorSet() {
         }
         fscanf(pInputFile, "%s", str);
         sscanf(&str[14], "%f", &data_f);
-        if( (*relaxd->setHwInfo)(ids[uiDevIp_], 10, &data_f, 4) ) {
+        if( (*relaxd->setHwInfo)(ids[uiDevIp_], HW_ITEM_TESTPULSEHI, &data_f, 4) ) {
             asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
                       "%s:%s: setup of hw parameter TestPulseHigh failed:\n",
                       driverName, functionName);
@@ -2072,7 +2072,11 @@ bool tpxDetector::setDetectorSet() {
                     break;
                 }
             }
-            if( (*relaxd->setHwInfo)(ids[uiDevIp_], (11+i), &data_lu, 4) ) {
+
+            // (0) HW_ITEM_TESTPULSEFREQ          11
+            // (1) HW_ITEM_BIAS_VOLTAGE_ADJUST    12
+            // (2) HW_ITEM_VDD_ADJUST             13
+            if( (*relaxd->setHwInfo)(ids[uiDevIp_], (HW_ITEM_TESTPULSEFREQ+i), &data_lu, 4) ) {
                 asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
                           "%s:%s: setup of hw parameter number %d failed:\n",
                           driverName, functionName, (i+2));
@@ -2089,7 +2093,18 @@ bool tpxDetector::setDetectorSet() {
                     break;
                 }
             }
-            if( (*relaxd->setHwInfo)(ids[uiDevIp_], (18+i), &data_lu, 4) ) {
+
+            // (0) HW_ITEM_FIRSTCHIPNR            18
+            // (1) HW_ITEM_LOGVERBOSE             19
+            // (2) HW_ITEM_PARREADOUT             20
+            // (3) HW_ITEM_STOREPIXELSCFG         21
+            // (4) HW_ITEM_STOREDACS              22
+            // (5) HW_ITEM_ERASE_STORED_CFG       23
+            // (6) HW_ITEM_CONF_TPX_CLOCK         24
+            // (7) HW_ITEM_CONF_RO_CLOCK_125MHZ   25
+            // (8) HW_ITEM_CONF_TPX_PRECLOCKS     26
+            // (9) HW_ITEM_RESERVED               27
+            if( (*relaxd->setHwInfo)(ids[uiDevIp_], (HW_ITEM_FIRSTCHIPNR+i), &data_lu, 4) ) {
                 asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
                           "%s:%s: setup of hw parameter number %d failed:\n",
                           driverName, functionName, (i+5));
@@ -2117,9 +2132,7 @@ bool tpxDetector::setDetectorSet() {
         return true;
     }
 
-    if((*relaxd->resetMatrix)(ids[uiDevIp_]))
-
-    {
+    if((*relaxd->resetMatrix)(ids[uiDevIp_])) {
         asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
                   "%s:%s: Error: resetMatrix() failed\n",
                   driverName, functionName);
