@@ -22,12 +22,14 @@ USR_LDFLAGS_Linux += -L$(JAVA_HOME)/jre/lib/amd64/server
 USR_SYS_LIBS_Linux  += jvm
 
 USR_LDFLAGS_Linux += -L$(BOOST_HOME)
-USR_SYS_LIBS_Linux  += boost_thread
-USR_SYS_LIBS_Linux  += boost_system
+USR_LDFLAGS_Linux += -L$(RELAXD)/Release/static
 
+USR_SYS_LIBS_Linux  += mpxhwrelaxd
+USR_SYS_LIBS_Linux  += boost_system
+USR_SYS_LIBS_Linux  += boost_thread
+USR_SYS_LIBS_Linux  += boost_chrono
 
 LIB_SRCS += tpxDetector.cpp
-LIB_SRCS += PxmMpx2Interface.cpp
 
 # <name>.dbd will be created from <name>Include.dbd
 DBD += tpxDetectorApp.dbd
