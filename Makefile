@@ -11,18 +11,16 @@ USR_INCLUDES += -I$(JAVA_HOME)/include
 USR_INCLUDES += -I$(JAVA_HOME)/include/linux
 USR_INCLUDES += -I$(JAVA_HOME)/bin
 USR_INCLUDES += -I$(JAVA_HOME)/jre/lib/amd64
-USR_INCLUDES += -I$(RELAXD)/lib/common
+USR_INCLUDES += -I$(RELAXD)/src
+USR_INCLUDES += -I$(RELAXD)/common
 USR_INCLUDES += -I$(BOOST_INSTALL)
-USR_INCLUDES += -I$(SOPHY_HOME)/lib/common
-
-#USR_INCLUDES += -I/home/dmitry/git/MpxHwRelaxd_CJdev/MpxHwRelaxd/common
-#USR_INCLUDES += -I/home/dmitry/git/MpxHwRelaxd_CJdev/MpxHwRelaxd/src
+# USR_INCLUDES += -I$(SOPHY_HOME)/lib/common
 
 USR_LDFLAGS_Linux += -L$(JAVA_HOME)/jre/lib/amd64/server
 USR_SYS_LIBS_Linux  += jvm
 
-USR_LDFLAGS_Linux += -L$(BOOST_HOME)
-USR_LDFLAGS_Linux += -L$(RELAXD)/Release/static
+USR_LDFLAGS_Linux += -L$(BOOST_INSTALL)/stage/lib
+USR_LDFLAGS_Linux += -L$(RELAXD)/Debug/static
 
 USR_SYS_LIBS_Linux  += mpxhwrelaxd
 USR_SYS_LIBS_Linux  += boost_system
@@ -38,7 +36,6 @@ DBD += tpxDetectorSupport.dbd
 LIBS += devIocStats
 LIBS += caPutLog
 
-#LIB_LIBS +=mpxmodule
 # <name>_registerRecordDeviceDriver.cpp will be created from <name>.dbd
 PROD_SRCS += tpxDetectorApp_registerRecordDeviceDriver.cpp tpxDetectorAppMain.cpp
 
@@ -46,7 +43,6 @@ PROD_SRCS += tpxDetectorApp_registerRecordDeviceDriver.cpp tpxDetectorAppMain.cp
 PROD_LIBS += tpxDetector
 
 include $(TOP)/ADApp/commonDriverMakefile
-#include $(TOP)/ADApp/timepixSrc3
 #=============================
 
 include $(TOP)/configure/RULES
