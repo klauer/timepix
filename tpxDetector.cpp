@@ -511,7 +511,7 @@ tpxDetector::tpxDetector(const char *portName, int maxBuffers,
 
     /* initialize internal variables uses to hold time delayed information.*/
     status |= getDoubleParam(ADAcquireTime, &dAcqTimeReq_);
-    dAcqTimeAct_ = dAcqTimeReq_;
+    dAcqTimeAct_ = dAcqTimeReq_ * 1000000.;
     status |= getIntegerParam(ADTriggerMode, &iTrigModeReq_);
     iTrigModeAct_ = iTrigModeReq_;
 
@@ -1291,7 +1291,7 @@ void tpxDetector::acquireTask(void) {
 
             status |= getDoubleParam(ADAcquireTime, &dAcqTimeReq_);
 
-            acquireTime=dAcqTimeReq_/1000000.;
+            acquireTime=dAcqTimeReq_;
 
             //extime=(int)(dAcqTimeReq_);
 
@@ -1638,11 +1638,13 @@ asynStatus tpxDetector::writeFloat64(asynUser *pasynUser, epicsFloat64 value) {
     if (function == ADAcquireTime) {
         getIntegerParam(ADStatus, &adstatus);
 
-        retstat |= getDoubleParam(ADAcquireTime, &dAcqTimeReq_);
+        dAcqTimeReq_ = value;
+        // retstat |= getDoubleParam(ADAcquireTime, &dAcqTimeReq_);
         asynPrint(pasynUser, ASYN_TRACE_FLOW,
                   "%s:%s: Setting Requested Acquisition Time: %f\n",
                   driverName, functionName, dAcqTimeReq_);
-        retstat |= setDoubleParam(ADAcquireTime, dAcqTimeAct_);
+        // retstat |= setDoubleParam(ADAcquireTime, dAcqTimeReq_);
+        dAcqTimeAct_ = dAcqTimeReq_ * 1000000.;
         // if the detector is idle then go ahead and set the value
         if ( adstatus == ADStatusIdle ) {
             setExposureTime();
@@ -1934,11 +1936,11 @@ asynStatus tpxDetector::setExposureTime() {
     asynPrint(pasynUserSelf, ASYN_TRACE_FLOW,
               "%s:%s: Setting AcquireTime %f\n",
               driverName, functionName, dAcqTimeReq_);
-    dAcqTimeAct_ = dAcqTimeReq_* 1000000.;
+    dAcqTimeAct_ = dAcqTimeReq_ * 1000000.;
     asynPrint(pasynUserSelf, ASYN_TRACE_FLOW,
               "%s:%s: internal timer: %f ms\n",
               driverName, functionName, dAcqTimeAct_);
-    status |= setDoubleParam(ADAcquireTime, dAcqTimeAct_);
+    status |= setDoubleParam(ADAcquireTime, dAcqTimeReq_);
     callParamCallbacks();
 
     return asynSuccess;
