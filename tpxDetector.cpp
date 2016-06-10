@@ -56,7 +56,7 @@ static const char *driverName = "tpxDetector";
 #define MAX_BAD_PIXELS 100
 #define MAX_MPX_DEV_COUNT 512
 //
-#define RAW_DATA_READOUT
+#undef RAW_DATA_READOUT
 
 #ifndef DEBUG
 #define DEBUG 0
@@ -70,7 +70,6 @@ static const char *driverName = "tpxDetector";
 // comment above two lines when using STPX
 
 // STPX
-//#define SINGLE
 //#define DIM_X 256
 //#define DIM_Y 256
 /////////////////////////////////////
@@ -120,6 +119,62 @@ typedef enum {
 
 class tpxDetector;
 
+template <class T> class ImageBuffer {
+public:
+    ImageBuffer(uint dimx, uint dimy) {
+        numAlloc_ = 0;
+        imageBuffer_ = NULL;
+        images_ = NULL;
+
+        dimX_ = dimx;
+        dimY_ = dimy;
+    }
+
+    bool reallocate(unsigned int frames) {
+        const int frame_size = dimX_ * dimY_ * sizeof(T);
+        imageBuffer_ = (T*)realloc((void*)imageBuffer_, frames * frame_size);
+        if (!imageBuffer_) {
+            numAlloc_ = 0;
+            return false;
+        }
+
+        images_ = (T**)realloc(images_, frames * sizeof(T*));
+
+        if (!images_) {
+            numAlloc_ = 0;
+            return false;
+        }
+
+        for (unsigned int i=0; i < frames; i++) {
+            images_[i] = &imageBuffer_[i * frame_size];
+        }
+        numAlloc_ = frames;
+        return true;
+    }
+
+    ~ImageBuffer() {
+        if (imageBuffer_ != NULL)
+            free(imageBuffer_);
+        if (images_ != NULL)
+            free(images_);
+    }
+
+    T* getImage(unsigned int idx) {
+        if (idx >= numAlloc_) {
+            return NULL;
+        }
+        return images_[idx];
+    }
+
+private:
+    unsigned int numAlloc_;
+    T *imageBuffer_;
+    T **images_;
+
+    uint dimX_;
+    uint dimY_;
+};
+
 /** Driver for the Timepix detectors */
 
 class tpxDetector : public ADDriver {
@@ -165,6 +220,7 @@ protected:
     void copyPixels(epicsInt16 *pInput, epicsInt16 *pOutput);
     void extendPixels(epicsInt16 *pInput, epicsInt16 *pOutput);
     void setupTriggering(bool internal);
+    ImageBuffer<epicsInt16> *imageBuffer_, *extImageBuffer_;
 
     int TPX_SystemID;
 #define TPX_FIRST_PARAM TPX_SystemID
@@ -239,11 +295,8 @@ private:
     epicsEventId stopEventId;
 
     // epicsEventId  acquireStopEvent_;
-    epicsInt16   *pAcqBuffer_;
-    epicsInt16   *pAcqBufferExt_;
-
     int           *pPixelCorrectionList_;
-    unsigned int  uiNumFrameBuffers_;
+    int            uiNumFrameBuffers_;
 
     unsigned int  uiDevIp_;
 
@@ -274,7 +327,6 @@ private:
     void resetDetector(void);
     //bool StartSoPhy (void);
     bool testShoot(void);
-    void setBinning(void);
     void loadDACsettings (void);
     void saveTofileYes (void);
     void saveTofileNo (void);
@@ -360,11 +412,15 @@ tpxDetector::tpxDetector(const char *portName, int maxBuffers,
 
     lastStatus_ = 0;
     lastConfiguration_ = 0;
-    pAcqBuffer_           = NULL;
-    pAcqBufferExt_           = NULL;
-    bInitAlways_          = false;
+    bInitAlways_       = false;
+
     uiRows_=DIM_X;
     uiColumns_=DIM_Y;
+    uiRowsAdd_=uiRows_+4;
+    uiColumnsAdd_=uiColumns_+4;
+
+    imageBuffer_ = new ImageBuffer<epicsInt16>(uiRows_, uiRowsAdd_);
+    extImageBuffer_ = new ImageBuffer<epicsInt16>(uiRowsAdd_, uiColumnsAdd_);
 
     /* Add parameters for this driver */
     createParam(TPX_SystemIDString,                    asynParamInt32,   &TPX_SystemID);
@@ -548,11 +604,8 @@ static void statusCheckTask(void *drvPvt) {
 //_____________________________________________________________________________________________
 
 tpxDetector::~tpxDetector() {
-
-    if (pAcqBuffer_ != NULL)
-        free(pAcqBuffer_);
-    if (pAcqBufferExt_ != NULL)
-        free(pAcqBufferExt_);
+    delete imageBuffer_;
+    delete extImageBuffer_;
     delete relaxd;
     mark=0;
     delete[] TDD;
@@ -588,10 +641,6 @@ bool tpxDetector::initializeDetector(void) {
     char cpCorrectionsDirectory[256];
     char cpPixConfigFile[256];
     char cpHWFile[256];
-    uiRows_=DIM_X;
-    uiColumns_=DIM_Y;
-    uiRowsAdd_=uiRows_+4;
-    uiColumnsAdd_=uiColumns_+4;
     //char str [25];
     //unsigned long data_lu=0;
     //float data_f=0;
@@ -648,9 +697,9 @@ bool tpxDetector::initializeDetector(void) {
         delete relaxd;
     }
 
-asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
-              "%s:%s: Point 1 \n",
-              driverName, functionName);
+    asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
+                  "%s:%s: Point 1 \n",
+                  driverName, functionName);
 
 
     relaxd = new MpxModule( uiDevIp_ );
@@ -699,35 +748,24 @@ asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
         return false;
     }
 
-
-
-    // allocate frame memory
-    if ((uiNumFrameBuffers_ <= 0) || (uiNumFrameBuffers_ > 500)) {
+    if ((uiNumFrameBuffers_ <= 0)) {
         uiNumFrameBuffers_ = 500;
         status = setIntegerParam(TPX_NumFrameBuffers, uiNumFrameBuffers_);
     }
-    if (pAcqBuffer_ != NULL)
-        free (pAcqBuffer_);
-    pAcqBuffer_ = (epicsInt16 *) malloc(uiNumFrameBuffers_ * uiRows_ * uiColumns_ * sizeof(epicsInt16));
-    if (pAcqBuffer_ == NULL) {
+
+    if (!imageBuffer_->reallocate(uiNumFrameBuffers_)) {
         asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
                   "%s:%s: Error:  Memory allocation failed for %d frames!\n",
                   driverName, functionName, uiNumFrameBuffers_);
         return false;
     }
 
-
-    if (pAcqBufferExt_ != NULL)
-        free (pAcqBufferExt_);
-    pAcqBufferExt_ = (epicsInt16 *) malloc(uiRows_ * uiColumns_ * sizeof(epicsInt16));
-    if (pAcqBufferExt_ == NULL) {
+    if (!extImageBuffer_->reallocate(1)) {
         asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
-                  "%s:%s: Error:  Memory allocation failed for extenmded buffer!\n",
-                  driverName, functionName);
+                  "%s:%s: Error:  Memory allocation failed for %d frames!\n",
+                  driverName, functionName, 1);
         return false;
     }
-
-
 
 
     //Update readback values
@@ -744,19 +782,20 @@ asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
     status |= setIntegerParam(TPX_InitializeRBV, 1);
     status |= setIntegerParam(TPX_NumFrameBuffersRBV, uiNumFrameBuffers_);
     status |= setIntegerParam(TPX_DevIpRBV, uiDevIp_);
-//////////////////////////////////////////////////////////////////////////////////
+
     status |= setIntegerParam(TPX_SaveToFile, 0);
     status |= setIntegerParam(TPX_SaveToFileRBV, 0);
-//////////////////////////////////////////////////////////////////////////////////
+
     status |= setIntegerParam (TPX_ExtendedFrame, NO);
     status |= setIntegerParam (TPX_ExtendedFrameRBV, NO);
-//////////////////////////////////////////////////////////////////////////////////
+
     callParamCallbacks();
 
     driverReady=true;
 
     return true;
 }
+
 
 
 void tpxDetector::setupTriggering(bool internal) {
@@ -1041,6 +1080,7 @@ void tpxDetector::acquireTask(void) {
     int extime;
     int imageCounter;
     int numImages, numImagesCounter, savetofile, ExtendedFrame;
+    int totalExposures, numExposures, exposureCounter;
     int imageMode;
     int trigmode;
     int arrayCallbacks=1;
@@ -1062,6 +1102,8 @@ void tpxDetector::acquireTask(void) {
     epicsInt16   *pInput = NULL;
     epicsInt16   *pRord = NULL;
 
+    totalExposures = 0;
+    exposureCounter = 0;
 #ifdef RAW_DATA_READOUT
     u8* myarray8;
     myarray8 = new u8[mtrx*multp];
@@ -1102,9 +1144,71 @@ void tpxDetector::acquireTask(void) {
             estatus = epicsEventTryWait(this->stopEventId);
             this->lock();
 
+            getIntegerParam(ADNumExposures, &numExposures);
+            if (numExposures > uiNumFrameBuffers_) {
+                uiNumFrameBuffers_ = numExposures + 10;
+                status = setIntegerParam(TPX_NumFrameBuffers, uiNumFrameBuffers_);
+                asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                          "%s:%s: increasing buffer size\n",
+                          driverName, functionName);
+                if (!imageBuffer_->reallocate(uiNumFrameBuffers_)) {
+                    asynPrint(pasynUserSelf, ASYN_TRACE_ERROR,
+                              "%s:%s: Error:  Memory allocation failed for %d frames!\n",
+                              driverName, functionName, uiNumFrameBuffers_);
+                    unlock();
+                    return;
+                }
+            }
+
+            exposureCounter = 0;
+
             setIntegerParam(ADNumImagesCounter, 0);
             status |= getIntegerParam(TPX_SaveToFile, &savetofile);
+
+            getIntegerParam(TPX_ExtendedFrame, &ExtendedFrame);
+            getIntegerParam(ADNumImages, &numImages);
+            getIntegerParam(ADNumExposures, &numExposures);
+            getIntegerParam(ADNumImagesCounter, &numImagesCounter);
+            getIntegerParam(ADImageMode, &imageMode);
+            getIntegerParam(NDArrayCounter, &imageCounter);
+
+            numImages = (imageMode == ADImageSingle ? 1 : numImages);
+            totalExposures = numImages * numExposures;
             asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,"%s:%s: ---------> save to file = %d\n", driverName, functionName,savetofile);
+
+            if (this->pArrays[0]) {
+                this->pArrays[0]->release();
+            }
+
+            // Allocate the array
+            if (ExtendedFrame == 1) {
+                dims[0] = uiColumnsAdd_;
+                dims[1] = uiRowsAdd_;
+            } else {
+                dims[0] = uiColumns_;
+                dims[1] = uiRows_;
+            }
+
+            dataType = NDInt16;
+
+            this->pArrays[0] = pNDArrayPool->alloc(2, dims, dataType, 0, NULL);
+
+            pImage = this->pArrays[0];
+
+            if (!pImage) {
+                asynPrint(this->pasynUserSelf, ASYN_TRACE_ERROR,
+                          "%s:%s: error allocating buffer\n",
+                          driverName, functionName);
+                unlock();
+                return;
+            }
+
+            pImage->getInfo(&arrayInfo);
+            setIntegerParam(NDArraySize,  arrayInfo.totalBytes);
+            setIntegerParam(NDArraySizeX, pImage->dims[0].size);
+            setIntegerParam(NDArraySizeY, pImage->dims[1].size);
+
+            memset(pImage->pData, 0, dims[0] * dims[1] * sizeof(epicsInt16));
 
 #ifdef RAW_DATA_READOUT
             if(savetofile==1) {
@@ -1134,41 +1238,36 @@ void tpxDetector::acquireTask(void) {
 
         callParamCallbacks();
         status |= getIntegerParam(ADTriggerMode, &trigmode);
-        getIntegerParam(ADNumImagesCounter, &numImagesCounter);
-
-
-
 
         if (trigmode==TPX_EXTERNAL_TRIGGER) {
             asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
                       "---- EXTERNAL TRIGGER MODE (image %d) ----\n",
                       numImagesCounter);
 
-            getIntegerParam(ADNumImagesCounter, &numImagesCounter);
  //           if(numImagesCounter==0) {
-                reg=0;
-                bit23=0;
-                bit24=0;
-        //        setupTriggering(false);
-        //        relaxd->setCallback( clb );
-                ap.useHwTimer=0;
-                ap.acqCount=0;
-                ap.enableCst=0;
-                ap.polarityPositive=1;
-                ap.time=0.0;
-                ap.mode=ACQMODE_HWTRIGSTART_HWTRIGSTOP;
-                relaxd->setAcqPars(&ap);
-                relaxd->readReg( MPIX2_CONF_REG_OFFSET, &reg );
-                reg &= ~BIT23;
-                reg &= ~BIT24;
-                if (bit23==1) { reg |= BIT23;}
-                if (bit24==1) { reg |= BIT24;}
-                relaxd->writeReg( MPIX2_CONF_REG_OFFSET, reg );
-                relaxd->testPulseEnable(0);
+            reg=0;
+            bit23=0;
+            bit24=0;
+    //        setupTriggering(false);
+    //        relaxd->setCallback( clb );
+            ap.useHwTimer=0;
+            ap.acqCount=0;
+            ap.enableCst=0;
+            ap.polarityPositive=1;
+            ap.time=0.0;
+            ap.mode=ACQMODE_HWTRIGSTART_HWTRIGSTOP;
+            relaxd->setAcqPars(&ap);
+            relaxd->readReg( MPIX2_CONF_REG_OFFSET, &reg );
+            reg &= ~BIT23;
+            reg &= ~BIT24;
+            if (bit23==1) { reg |= BIT23;}
+            if (bit24==1) { reg |= BIT24;}
+            relaxd->writeReg( MPIX2_CONF_REG_OFFSET, reg );
+            relaxd->testPulseEnable(0);
 
 //            }
 
-            epicsTimeStamp t0, t1;
+            // epicsTimeStamp t0, t1;
 
             epicsTimeGetCurrent(&startTime);
             // Open the ADShutter
@@ -1213,7 +1312,6 @@ void tpxDetector::acquireTask(void) {
                     asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
                               "** new frame **\n");
                     read_frame = true;
-                    pInput = &pAcqBuffer_[0];
 
 #ifdef RAW_DATA_READOUT
 
@@ -1225,6 +1323,7 @@ void tpxDetector::acquireTask(void) {
                     }
 
 #else
+                    pInput = imageBuffer_->getImage(exposureCounter);
                     relaxd->readMatrix(pInput,mtrx);
 #endif
                     // Close the ADshutter
@@ -1259,20 +1358,14 @@ void tpxDetector::acquireTask(void) {
                 }
             }
 
-
-
-            getIntegerParam(ADNumImages, &numImages);
-            getIntegerParam(ADNumImagesCounter, &numImagesCounter);
-            getIntegerParam(ADImageMode, &imageMode);
-            if (!read_frame ||
-                (imageMode == ADImageSingle) ||
-                ((imageMode == ADImageMultiple) && (numImagesCounter >= numImages))) {
+            if (!read_frame || (numImagesCounter >= numImages)) {
+                exposureCounter = 0;
                 asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
                           "(Read frame: %d Mode=%d Image counter %d of %d)\n",
                           read_frame, imageMode, numImagesCounter, numImages);
                 asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
                           "End of acquisition/broken acquisition, inhibit triggers ");
-            relaxd->stopAcquisition();
+                relaxd->stopAcquisition();
             }
 
             if (!read_frame) {
@@ -1287,16 +1380,13 @@ void tpxDetector::acquireTask(void) {
                       "---- INTERNAL TRIGGER MODE (image %d) ----\n",
                       numImagesCounter);
 
-            getIntegerParam(ADNumImagesCounter, &numImagesCounter);
-
             status |= getDoubleParam(ADAcquireTime, &dAcqTimeReq_);
 
             acquireTime=dAcqTimeReq_;
 
             //extime=(int)(dAcqTimeReq_);
 
-
-            if(numImagesCounter==0) {
+            if(numImagesCounter==0 && exposureCounter==0) {
             //    setupTriggering(true);
                 relaxd->setCallback( clb );
                 ap.useHwTimer=1;
@@ -1306,19 +1396,14 @@ void tpxDetector::acquireTask(void) {
                 ap.time=acquireTime;
                 ap.mode=ACQMODE_ACQSTART_TIMERSTOP;
                 relaxd->setAcqPars(&ap);
+                epicsTimeGetCurrent(&startTime);
             }
 
             // Open the ADShutter
             setShutter(1);
             callParamCallbacks();
             if (dAcqTimeReq_ > 0.0) {
-                epicsTimeGetCurrent(&startTime);
-
-
-                // Camera acquisition
-
                 relaxd->startAcquisition();
-                // EPICS timer
 
                 this->unlock();
                 estatus = epicsEventWaitWithTimeout(this->stopEventId, acquireTime);
@@ -1347,15 +1432,13 @@ void tpxDetector::acquireTask(void) {
                     continue;
                 }
 
-                pInput = &pAcqBuffer_[0];
-                //       pInput = &pAcqBuffer_[uiColumns_ * uiRows_ * numImagesCounter];
-
 #ifdef RAW_DATA_READOUT
                 relaxd->readMatrixRaw(myarray8, &nbytes, &lostRows);
                 if(writeRawDataFlag && this->writeRawData(myarray8, mtrx*multp, lostRows)!=0) {
                     asynPrint(this->pasynUserSelf, ASYN_TRACE_ERROR,"%s:%s: Could not write raw data\n", driverName, functionName);
                 }
 #else
+                pInput = imageBuffer_->getImage(exposureCounter);
                 relaxd->readMatrix(pInput,mtrx);
 #endif
 
@@ -1367,115 +1450,65 @@ void tpxDetector::acquireTask(void) {
             continue;
         }
 
-        // ** Push acquired frame out to EPICS
-        dataType = NDInt16;
-        if (this->pArrays[0]) {
-            this->pArrays[0]->release();
-        }
+        exposureCounter++;
 
-        // Allocate the array
-#ifdef SINGLE
-        dims[0] = uiColumns_;
-        dims[1] = uiRows_;
-#else
-        getIntegerParam(TPX_ExtendedFrame, &ExtendedFrame);
-        if(ExtendedFrame==1) {
-            dims[0] = uiColumnsAdd_;
-            dims[1] = uiRowsAdd_;
-            pRord = &pAcqBufferExt_[0];
-        } else {
-            dims[0] = uiColumns_;
-            dims[1] = uiRows_;
-        }
-#endif
+        printf("exposures %d\n", exposureCounter);
+        if (exposureCounter >= numExposures) {
+            pRord = extImageBuffer_->getImage(0);
+            if(ExtendedFrame==1) {
+                for (int i=0; i < exposureCounter; i++) {
+                    this->reorderPixels(imageBuffer_->getImage(i), pRord);
+                    this->extendPixels(pRord, (epicsInt16*)pImage->pData);
+                }
+            } else {
+                for (int i=0; i < exposureCounter; i++) {
+                    this->reorderPixels(imageBuffer_->getImage(i),
+                                        (epicsInt16*)pImage->pData);
+                }
+            }
 
-        this->pArrays[0] = pNDArrayPool->alloc(2, dims, dataType, 0, NULL);
-        if (this->pArrays[0] == NULL) {
-            asynPrint(this->pasynUserSelf, ASYN_TRACE_ERROR,
-                      "%s:%s: error allocating buffer\n",
-                      driverName, functionName);
-            unlock();
-            return;
-        }
-        pImage = this->pArrays[0];
-        pImage->getInfo(&arrayInfo);
+            numImagesCounter++;
+            imageCounter++;
+            setIntegerParam(NDArrayCounter, imageCounter);
+            setIntegerParam(ADNumImagesCounter, numImagesCounter);
+            exposureCounter = 0;
 
-        setIntegerParam(NDArraySize,  arrayInfo.totalBytes);
-        setIntegerParam(NDArraySizeX, pImage->dims[0].size);
-        setIntegerParam(NDArraySizeY, pImage->dims[1].size);
+            // Put the frame number and time stamp into the buffer
+            pImage->uniqueId = imageCounter;
+            pImage->timeStamp = startTime.secPastEpoch + startTime.nsec / 1.e9;
 
-        // Get the current parameters
-        getIntegerParam(NDArrayCounter, &imageCounter);
-        getIntegerParam(ADNumImages, &numImages);
-        getIntegerParam(ADNumImagesCounter, &numImagesCounter);
-        getIntegerParam(ADImageMode, &imageMode);
-        getIntegerParam(NDArrayCallbacks, &arrayCallbacks);
+            // Get any attributes that have been defined for this driver
+            this->getAttributes(pImage->pAttributeList);
 
-        imageCounter++;
-        numImagesCounter++;
-        setIntegerParam(NDArrayCounter, imageCounter);
-        setIntegerParam(ADNumImagesCounter, numImagesCounter);
-
-        // Put the frame number and time stamp into the buffer
-        pImage->uniqueId = imageCounter;
-        pImage->timeStamp = startTime.secPastEpoch + startTime.nsec / 1.e9;
-
-        // Get any attributes that have been defined for this driver
-        this->getAttributes(pImage->pAttributeList);
-
-        // NOTE: for fast acquisition and raw file writing,
-        //       disable array callbacks!
-        if(isTimeForPreviewUpdate() || arrayCallbacks) {
-            asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
-                      "%s:%s: updating arrays\n", driverName, functionName);
+            // NOTE: for fast acquisition and raw file writing,
+            //       disable array callbacks!
+            getIntegerParam(NDArrayCallbacks, &arrayCallbacks);
+            if(isTimeForPreviewUpdate() || arrayCallbacks) {
+                asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                          "%s:%s: updating arrays\n", driverName, functionName);
 
 #ifdef RAW_DATA_READOUT
-#  ifdef SINGLE
-            relaxd->stream2Data(myarray8,pInput);
-#  else
-            relaxd->parStream2Data(myarray8,pInput);
-
-#  endif
+                relaxd->parStream2Data(myarray8,pInput);
 #endif
 
-#ifdef SINGLE
-            //   asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,"%s:%s: dim_x %d,  dim_y %d, totbytes %d\n", driverName, functionName, uiColumns_, uiRows_,arrayInfo.totalBytes);
-            memcpy(((epicsInt16*)pImage->pData), pInput, arrayInfo.totalBytes);
-            //         this->copyPixels(pInput,(epicsInt16*)pImage->pData);
-#else
-            //	        asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,"%s:%s: test 1 \n", driverName, functionName);
-
-            if(ExtendedFrame==1) {
-                this->reorderPixels(pInput,pRord);
-                asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
-                          "%s:%s: reorder pixels done\n", driverName, functionName);
-                this->extendPixels(pRord,(epicsInt16*)pImage->pData);
-                asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
-                          "%s:%s: extend pixels done\n", driverName, functionName);
-
-            } else {
-                this->reorderPixels(pInput,(epicsInt16*)pImage->pData);
+                if (arrayCallbacks) {
+                    // Call the NDArray callback
+                    // Must release the lock here, or we can get into a deadlock, because we can
+                    //  block on the plugin lock, and the plugin can be calling us
+                    this->unlock();
+                    asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
+                              "%s:%s: calling imageData callback\n", driverName, functionName);
+                    doCallbacksGenericPointer(pImage, NDArrayData, 0);
+                    this->lock();
+                }
             }
-#endif
 
-            if (arrayCallbacks) {
-                // Call the NDArray callback
-                // Must release the lock here, or we can get into a deadlock, because we can
-                //  block on the plugin lock, and the plugin can be calling us
-                this->unlock();
+            // See if acquisition is done
+            if (numImagesCounter >= numImages) {
+                setIntegerParam(ADAcquire, 0);
                 asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
-                          "%s:%s: calling imageData callback\n", driverName, functionName);
-                doCallbacksGenericPointer(pImage, NDArrayData, 0);
-                this->lock();
+                          "%s:%s: acquisition completed\n", driverName, functionName);
             }
-        }
-
-        // See if acquisition is done
-        if ((imageMode == ADImageSingle) ||
-            ((imageMode == ADImageMultiple) && (numImagesCounter >= numImages))) {
-            setIntegerParam(ADAcquire, 0);
-            asynPrint(this->pasynUserSelf, ASYN_TRACE_FLOW,
-                      "%s:%s: acquisition completed\n", driverName, functionName);
         }
 
         // Call the callbacks to update any changes
@@ -1491,7 +1524,7 @@ void tpxDetector::acquireTask(void) {
                       "%s:%s: frame poll_count=%d\n",
                       driverName, functionName, poll_count);
 
-            if (trigmode == TPX_INTERNAL_TRIGGER) {
+            if (trigmode == TPX_INTERNAL_TRIGGER && exposureCounter == 0) {
                 status |= getDoubleParam(ADAcquirePeriod, &acquirePeriod);
                 while ((elapsedTime < acquirePeriod) && (estatus != epicsEventWaitOK)) {
                     this->unlock();
@@ -1545,11 +1578,6 @@ asynStatus tpxDetector::writeInt32(asynUser *pasynUser, epicsInt32 value) {
             // This was a command to stop acquisition
             // Send the stop event
             epicsEventSignal(this->stopEventId);
-        }
-    } else if ((function == ADBinX) ||
-               (function == ADBinY)) {
-        if ( adstatus == ADStatusIdle ) {
-//           setBinning();
         }
     } else if (function == TPX_Initialize) {
         getIntegerParam(ADStatus, &adstatus);
@@ -1675,28 +1703,14 @@ asynStatus tpxDetector::writeFloat64(asynUser *pasynUser, epicsFloat64 value) {
 //_____________________________________________________________________________________________
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
-void tpxDetector::setBinning(void) {
-    int binX, binY, sizeX, sizeY;
-//    static const char *functionName = "setBinning";
-
-    getIntegerParam(ADBinX, &binX);
-    getIntegerParam(ADBinY, &binY);
-    getIntegerParam(ADMaxSizeX, &sizeX);
-    getIntegerParam(ADMaxSizeY, &sizeY);
-    uiColumns_ = sizeX/binX;
-    uiRows_    = sizeY/binY;
-}
-///////////////////////////////////////////////////////////////////////////////////
-//_____________________________________________________________________________________________
-
 void tpxDetector::reorderPixels(epicsInt16 *pInput, epicsInt16 *pOutput) {
     int b=0;
     for(int r=0; r<256; r++) {
         for(int c=0; c<256; c++) {
-            pOutput[b]=pInput[c+r*256];
-            pOutput[256+b]=pInput[256*256+c+r*256];
-            pOutput[256*512+b]=pInput[256*512+256*256+(255-c)+(255-r)*256];
-            pOutput[256*512+256+b++]=pInput[256*512+(255-c)+(255-r)*256];
+            pOutput[b]+=pInput[c+r*256];
+            pOutput[256+b]+=pInput[256*256+c+r*256];
+            pOutput[256*512+b]+=pInput[256*512+256*256+(255-c)+(255-r)*256];
+            pOutput[256*512+256+b++]+=pInput[256*512+(255-c)+(255-r)*256];
         }
         b+=256;
     }
@@ -1713,38 +1727,38 @@ void tpxDetector::copyPixels(epicsInt16 *pInput, epicsInt16 *pOutput) {
 
 void tpxDetector::extendPixels(epicsInt16 *pInput, epicsInt16 *pOutput) {
     int ii,jj;
-    double cc=1.0/3.0;
-    double cc2=cc*cc;
+    const double cc=1.0/3.0;
+    const double cc2=cc*cc;
 
 
     for(ii=0; ii<3; ii++) {
         for(jj=0; jj<3; jj++) {
-            pOutput[516*(255+ii)+255+jj]=static_cast<epicsInt16>(static_cast<double>(pInput[512*255+255])*cc2);
-            pOutput[516*(255+ii)+258+jj]=static_cast<epicsInt16>(static_cast<double>(pInput[512*255+256])*cc2);
-            pOutput[516*(258+ii)+255+jj]=static_cast<epicsInt16>(static_cast<double>(pInput[512*256+255])*cc2);
-            pOutput[516*(258+ii)+258+jj]=static_cast<epicsInt16>(static_cast<double>(pInput[512*256+256])*cc2);
+            pOutput[516*(255+ii)+255+jj]+=static_cast<epicsInt16>(static_cast<double>(pInput[512*255+255])*cc2);
+            pOutput[516*(255+ii)+258+jj]+=static_cast<epicsInt16>(static_cast<double>(pInput[512*255+256])*cc2);
+            pOutput[516*(258+ii)+255+jj]+=static_cast<epicsInt16>(static_cast<double>(pInput[512*256+255])*cc2);
+            pOutput[516*(258+ii)+258+jj]+=static_cast<epicsInt16>(static_cast<double>(pInput[512*256+256])*cc2);
 
         }
     }
     for(ii=0; ii<255; ii++) {
         for(jj=0; jj<3; jj++) {
-            pOutput[516*ii+255+jj]=static_cast<epicsInt16>(static_cast<double>(pInput[512*ii+255])*cc);
-            pOutput[516*ii+258+jj]=static_cast<epicsInt16>(static_cast<double>(pInput[512*ii+256])*cc);
+            pOutput[516*ii+255+jj]+=static_cast<epicsInt16>(static_cast<double>(pInput[512*ii+255])*cc);
+            pOutput[516*ii+258+jj]+=static_cast<epicsInt16>(static_cast<double>(pInput[512*ii+256])*cc);
 
-            pOutput[516*(ii+261)+255+jj]=static_cast<epicsInt16>(static_cast<double>(pInput[512*(ii+257)+255])*cc);
-            pOutput[516*(ii+261)+258+jj]=static_cast<epicsInt16>(static_cast<double>(pInput[512*(ii+257)+256])*cc);
+            pOutput[516*(ii+261)+255+jj]+=static_cast<epicsInt16>(static_cast<double>(pInput[512*(ii+257)+255])*cc);
+            pOutput[516*(ii+261)+258+jj]+=static_cast<epicsInt16>(static_cast<double>(pInput[512*(ii+257)+256])*cc);
 
-            pOutput[516*(255+jj)+ii]=static_cast<epicsInt16>(static_cast<double>(pInput[512*255+ii])*cc);
-            pOutput[516*(258+jj)+ii]=static_cast<epicsInt16>(static_cast<double>(pInput[512*256+ii])*cc);
+            pOutput[516*(255+jj)+ii]+=static_cast<epicsInt16>(static_cast<double>(pInput[512*255+ii])*cc);
+            pOutput[516*(258+jj)+ii]+=static_cast<epicsInt16>(static_cast<double>(pInput[512*256+ii])*cc);
 
-            pOutput[516*(255+jj)+ii+261]=static_cast<epicsInt16>(static_cast<double>(pInput[512*255+ii+257])*cc);
-            pOutput[516*(258+jj)+ii+261]=static_cast<epicsInt16>(static_cast<double>(pInput[512*256+ii+257])*cc);
+            pOutput[516*(255+jj)+ii+261]+=static_cast<epicsInt16>(static_cast<double>(pInput[512*255+ii+257])*cc);
+            pOutput[516*(258+jj)+ii+261]+=static_cast<epicsInt16>(static_cast<double>(pInput[512*256+ii+257])*cc);
         }
         for(jj=0; jj<255; jj++) {
-            pOutput[516*ii+jj]=pInput[512*ii+jj];
-            pOutput[516*(ii+261)+jj]=pInput[512*(ii+257)+jj];
-            pOutput[516*ii+jj+261]=pInput[512*ii+jj+257];
-            pOutput[516*(ii+261)+jj+261]=pInput[512*(ii+257)+jj+257];
+            pOutput[516*ii+jj]+=pInput[512*ii+jj];
+            pOutput[516*(ii+261)+jj]+=pInput[512*(ii+257)+jj];
+            pOutput[516*ii+jj+261]+=pInput[512*ii+jj+257];
+            pOutput[516*(ii+261)+jj+261]+=pInput[512*(ii+257)+jj+257];
         }
     }
 

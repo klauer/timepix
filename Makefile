@@ -17,6 +17,7 @@ USR_INCLUDES += -I$(BOOST_INSTALL)
 # USR_INCLUDES += -I$(SOPHY_HOME)/lib/common
 
 USR_LDFLAGS_Linux += -L$(JAVA_HOME)/jre/lib/amd64/server
+USR_CPPFLAGS_Linux += -g
 USR_SYS_LIBS_Linux  += jvm
 
 USR_LDFLAGS_Linux += -L$(BOOST_INSTALL)/stage/lib
